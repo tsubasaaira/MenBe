@@ -28,8 +28,52 @@ async function api(op:string,data?:any){
 function Picker({label,value,options,onChange}:{label:string;value:string;options:string[];onChange:(s:string)=>void}){return <label className="field"><span>{label}</span><Select value={value} onValueChange={onChange}><SelectTrigger className="pick"><SelectValue/></SelectTrigger><SelectContent>{options.map(s=><SelectItem key={s} value={s}>{s}</SelectItem>)}</SelectContent></Select></label>;}
 function TextField({label,value,onChange,rows=0,...rest}:any){return <label className="field"><span>{label}</span>{rows?<textarea rows={rows} value={value} onChange={e=>onChange(e.target.value)} {...rest}/>:<input value={value} onChange={e=>onChange(e.target.value)} {...rest}/>}</label>;}
 function AvatarBadge({avatar,size=''}:{avatar:Avatar;size?:string}){return <span className={`avatar ${size}`} style={{background:avatar.shirt}} title={`${avatar.hair}, ${avatar.style}`}><span>{avatar.face}</span><small>{avatar.hair==='Bertudung'?'🧕':avatar.hair==='Topi'?'🧢':avatar.hair==='Panjang'?'✿':'★'}</small></span>;}
-async function getMalayVoice(){if(!('speechSynthesis'in window))return null;const pick=()=>{const voices=speechSynthesis.getVoices();const exact=voices.find(v=>/^(ms-MY|ms|id-ID|id)$/i.test(v.lang));if(exact)return exact;return voices.find(v=>/^(ms|id)(-|$)/i.test(v.lang))||voices.find(v=>/(Malay|Malaysia|Indonesian|Indonesia)/i.test(`${v.name} ${v.lang}`))||null;};let voice=pick();if(voice)return voice;await new Promise<void>(resolve=>{let done=false;const finish=()=>{if(done)return;done=true;speechSynthesis.removeEventListener?.('voiceschanged',finish);resolve();};speechSynthesis.addEventListener?.('voiceschanged',finish,{once:true});setTimeout(finish,900);});return pick();}
-function AudioPlayer({text}:{text:string}){const [playing,setPlaying]=useState(false);const [error,setError]=useState('');useEffect(()=>()=>{window.speechSynthesis?.cancel();},[text]);async function play(){if(!('speechSynthesis'in window)){setError('Audio tidak disokong pada peranti ini. Kamu boleh membaca transkrip di bawah.');return;}setError('');speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(text);const voice=await getMalayVoice();if(voice){u.voice=voice;u.lang=voice.lang;}else{u.lang='id-ID';setError('Suara Melayu/Indonesia khusus tidak ditemui pada peranti ini. Sistem akan cuba sebutan Bahasa Indonesia.');}u.rate=.82;u.pitch=1;u.onend=()=>setPlaying(false);u.onerror=()=>{setPlaying(false);setError('Audio belum tersedia. Cuba Chrome/Edge atau pasang suara Bahasa Melayu/Indonesia pada peranti.');};speechSynthesis.speak(u);setPlaying(true);}return <div className="audio"><div className="audio-icon"><Volume2/></div><div className="audio-label"><strong>Dengar cerita / arahan</strong><span>Bahasa Melayu / Indonesia · Boleh diulang</span></div><button className="iconbtn" aria-label="Main atau ulang audio" onClick={play}><Play/></button><button className="iconbtn" aria-label={playing?'Jeda audio':'Sambung audio'} onClick={()=>{if(playing)speechSynthesis?.pause();else speechSynthesis?.resume();setPlaying(!playing);}}><Pause/></button><button className="iconbtn" aria-label="Hentikan audio" onClick={()=>{speechSynthesis?.cancel();setPlaying(false);}}><Square/></button>{error&&<p className="small error">{error}</p>}</div>;}
+async function getIndonesianOrMalayVoice(){
+ if(!('speechSynthesis'in window))return null;
+ const rank=(v:SpeechSynthesisVoice)=>{
+   const lang=(v.lang||'').toLowerCase(),name=(v.name||'').toLowerCase();
+   if(lang==='id-id')return 100;
+   if(lang==='id')return 95;
+   if(lang.startsWith('id-'))return 90;
+   if(name.includes('indones')||name.includes('bahasa indonesia'))return 85;
+   if(lang==='ms-my')return 80;
+   if(lang==='ms')return 75;
+   if(lang.startsWith('ms-'))return 70;
+   if(name.includes('malay')||name.includes('malaysia'))return 65;
+   return 0;
+ };
+ const pick=()=>speechSynthesis.getVoices().map(v=>({v,score:rank(v)})).filter(x=>x.score>0).sort((a,b)=>b.score-a.score)[0]?.v||null;
+ let voice=pick();
+ if(voice)return voice;
+ await new Promise<void>(resolve=>{
+   let done=false;
+   const finish=()=>{if(done)return;done=true;speechSynthesis.removeEventListener?.('voiceschanged',finish);resolve();};
+   speechSynthesis.addEventListener?.('voiceschanged',finish,{once:true});
+   setTimeout(finish,1800);
+ });
+ return pick();
+}
+function AudioPlayer({text}:{text:string}){
+ const [playing,setPlaying]=useState(false),[error,setError]=useState(''),[voiceName,setVoiceName]=useState('');
+ useEffect(()=>()=>{window.speechSynthesis?.cancel();},[text]);
+ async function play(){
+   if(!('speechSynthesis'in window)){setError('Audio tidak disokong pada peranti ini. Gunakan Chrome atau Edge.');return;}
+   setError('');setVoiceName('');speechSynthesis.cancel();
+   const voice=await getIndonesianOrMalayVoice();
+   if(!voice){
+     setPlaying(false);
+     setError('Tiada suara Bahasa Indonesia atau Bahasa Melayu dipasang pada peranti/browser ini. Audio tidak dimainkan supaya ia tidak bertukar kepada suara English. Cuba Chrome/Edge atau pasang voice Bahasa Indonesia/Melayu pada sistem.');
+     return;
+   }
+   const u=new SpeechSynthesisUtterance(text);
+   u.voice=voice;u.lang=voice.lang||'id-ID';u.rate=.82;u.pitch=1;
+   setVoiceName(`${voice.name} · ${voice.lang}`);
+   u.onend=()=>setPlaying(false);
+   u.onerror=()=>{setPlaying(false);setError('Audio tidak dapat dimainkan dengan voice Bahasa Indonesia/Melayu yang dipilih. Cuba voice/peranti lain.');};
+   speechSynthesis.speak(u);setPlaying(true);
+ }
+ return <div className="audio"><div className="audio-icon"><Volume2/></div><div className="audio-label"><strong>Dengar cerita / arahan</strong><span>{voiceName?`Voice: ${voiceName}`:'Bahasa Indonesia diutamakan · Bahasa Melayu sebagai fallback'}</span></div><button className="iconbtn" aria-label="Main atau ulang audio" onClick={play}><Play/></button><button className="iconbtn" aria-label={playing?'Jeda audio':'Sambung audio'} onClick={()=>{if(playing)speechSynthesis?.pause();else speechSynthesis?.resume();setPlaying(!playing);}}><Pause/></button><button className="iconbtn" aria-label="Hentikan audio" onClick={()=>{speechSynthesis?.cancel();setPlaying(false);}}><Square/></button>{error&&<p className="small error">{error}</p>}</div>;
+}
 
 export default function SkuadApp({initialView='home'}:{initialView?:View}){
  const [view,setView]=useState<View>(initialView),[settings,setSettings]=useState(false),[help,setHelp]=useState(false),[join,setJoin]=useState(false),[joinStep,setJoinStep]=useState(0),[demo,setDemo]=useState(false),[user,setUser]=useState<any>(null),[ai,setAi]=useState(false),[online,setOnline]=useState(true),[busy,setBusy]=useState(false),[error,setError]=useState(''),[code,setCode]=useState(''),[nickname,setNickname]=useState(''),[avatar,setAvatar]=useState<Avatar>(defaultAvatar),[activity,setActivity]=useState<Activity>(sample),[session,setSession]=useState<any>(null),[responses,setResponses]=useState<any[]>([]),[station,setStation]=useState(1),[font,setFont]=useState(100),[dark,setDark]=useState(false),[readable,setReadable]=useState(false),[motion,setMotion]=useState(false),[sound,setSound]=useState(false),[resume,setResume]=useState<any>(null);

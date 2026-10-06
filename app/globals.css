@@ -1,7 +1,11 @@
-@import url("https://fonts.googleapis.com/css2?family=Sniglet:wght@400;800&display=swap");
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "../vendor/shadcn-tailwind-4.13.0.css";
+/* SKUAD typography — force Sniglet across the application. */
+html,body,#root,#root *{font-family:'Sniglet','Trebuchet MS',Arial,sans-serif!important;}
+input,textarea,select,button{font-family:'Sniglet','Trebuchet MS',Arial,sans-serif!important;}
+code,pre,kbd,samp{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace!important;}
+
 :root{--background:#f8faf7;--foreground:#193d35;--card:#fff;--card-foreground:#193d35;--popover:#fff;--popover-foreground:#193d35;--primary:#17664f;--primary-foreground:#fff;--secondary:#eff4ed;--secondary-foreground:#244c3d;--muted:#eef3ef;--muted-foreground:#62766d;--accent:#e8f2e9;--accent-foreground:#17664f;--destructive:#aa4435;--border:#dde7de;--input:#d3ded5;--ring:#398c6b;--radius:1rem;--yellow:#f5d675;--peach:#fae1d5;--shadow:0 10px 30px #254d3610;--sidebar:#fff;--sidebar-foreground:#193d35;--sidebar-primary:#17664f;--sidebar-primary-foreground:white;--sidebar-accent:#e8f2e9;--sidebar-accent-foreground:#17664f;--sidebar-border:#dde7de;--sidebar-ring:#398c6b}
 .dark{--background:#142922;--foreground:#edf5e9;--card:#213b31;--card-foreground:#edf5e9;--popover:#213b31;--popover-foreground:#edf5e9;--primary:#95dbb8;--primary-foreground:#13392b;--secondary:#2b4a3b;--secondary-foreground:#e2f0e6;--muted:#284236;--muted-foreground:#bad0c0;--accent:#355641;--accent-foreground:#c2f3d4;--border:#41614e;--input:#57745c;--ring:#9ee2ba;--shadow:none;--peach:#4d3e30}
 @theme inline{--color-background:var(--background);--color-foreground:var(--foreground);--color-card:var(--card);--color-card-foreground:var(--card-foreground);--color-popover:var(--popover);--color-popover-foreground:var(--popover-foreground);--color-primary:var(--primary);--color-primary-foreground:var(--primary-foreground);--color-secondary:var(--secondary);--color-secondary-foreground:var(--secondary-foreground);--color-muted:var(--muted);--color-muted-foreground:var(--muted-foreground);--color-accent:var(--accent);--color-accent-foreground:var(--accent-foreground);--color-destructive:var(--destructive);--color-border:var(--border);--color-input:var(--input);--color-ring:var(--ring);--radius-sm:calc(var(--radius) - 4px);--radius-md:calc(var(--radius) - 2px);--radius-lg:var(--radius);--radius-xl:calc(var(--radius) + 4px)}
