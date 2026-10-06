@@ -1,0 +1,73 @@
+import {initializeApp,getApps,cert} from 'firebase-admin/app';
+import {getAuth,type DecodedIdToken} from 'firebase-admin/auth';
+import {getFirestore,type Firestore} from 'firebase-admin/firestore';
+import {randomUUID,randomBytes,createHash} from 'node:crypto';
+import {activitySchema,type Activity} from '../../lib/activity';
+import {studentActivity,checkAnswer,isTeacher} from '../../lib/server-rules';
+class AppError extends Error {constructor(message:string,public status=400){super(message);}}
+const json=(body:unknown,status=200)=>Response.json(body,{status,headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
+type Env={FIREBASE_SERVICE_ACCOUNT_JSON?:string;OPENAI_API_KEY?:string;OPENAI_MODEL?:string};
+function setup(env:Env){if(!getApps().length){const value=env.FIREBASE_SERVICE_ACCOUNT_JSON;if(!value)throw new AppError('Firebase pelayan belum dikonfigurasi. Tambah FIREBASE_SERVICE_ACCOUNT_JSON dalam Cloudflare.',503);let key;try{key=JSON.parse(value);}catch{throw new AppError('Format FIREBASE_SERVICE_ACCOUNT_JSON tidak sah.',503);}initializeApp({credential:cert(key)});}return getFirestore();}
+function str(v:unknown,max=5000){if(typeof v!=='string'||!v.trim()||v.length>max)throw new AppError('Sila lengkapkan maklumat dengan betul.');return v.trim();}
+function docId(v:unknown){const s=str(v,160);if(!/^[a-zA-Z0-9:_-]+$/.test(s))throw new AppError('ID tidak sah.');return s;}
+async function identity(req:Request):Promise<DecodedIdToken>{const bearer=req.headers.get('authorization')?.match(/^Bearer (.+)$/)?.[1];if(!bearer)throw new AppError('Sila log masuk atau sertai sesi dahulu.',401);try{return await getAuth().verifyIdToken(bearer,true);}catch{throw new AppError('Sesi log masuk tidak sah. Log masuk semula.',401);}}
+function teacher(user:DecodedIdToken){if(!isTeacher(user))throw new AppError('Log masuk sebagai guru menggunakan akaun Google atau e-mel yang telah disahkan.',403);}
+async function ownedSession(db:Firestore,sid:unknown,uid:string){const ref=db.collection('sessions').doc(docId(sid));const snap=await ref.get();if(!snap.exists||snap.data()!.owner!==uid)throw new AppError('Sesi tidak ditemui.',404);return {ref,data:snap.data()!};}
+async function participation(db:Firestore,uid:string){const m=await db.collection('memberships').doc(uid).get();if(!m.exists)throw new AppError('Sila sertai sesi dahulu.',404);const p=await db.collection('pupils').doc(m.data()!.pupilId).get();if(!p.exists||p.data()!.uid!==uid)throw new AppError('Penyertaan tidak sah.',403);const s=await db.collection('sessions').doc(p.data()!.session_id).get();if(!s.exists)throw new AppError('Sesi tidak ditemui.',404);return {p:{...p.data()!,id:p.id},s:{...s.data()!,id:s.id}} as {p:any;s:any};}
+async function pupilResponses(db:Firestore,pid:string){const r=await db.collection('responses').where('pupil_id','==',pid).get();return r.docs.map(d=>({id:d.id,...d.data()}));}
+async function handler(req:Request,env:Env):Promise<Response>{
+ try{
+  const url=new URL(req.url);const op=url.searchParams.get('op');
+  if(!['GET','POST'].includes(req.method))return json({error:'Kaedah tidak dibenarkan.'},405);
+  if(req.method==='GET'&&op==='me'&&!req.headers.get('authorization'))return json({user:null,ai:!!env.OPENAI_API_KEY});
+  const db=setup(env);const user=await identity(req);const now=new Date().toISOString();
+  if(req.method==='GET'){
+   if(op==='me'){if(user.firebase.sign_in_provider==='anonymous')return json({user:null,ai:!!env.OPENAI_API_KEY});teacher(user);return json({user:{name:user.name||'Cikgu',email:user.email},ai:!!env.OPENAI_API_KEY});}
+   if(op==='restore'||op==='progress'){const {p,s}=await participation(db,user.uid);const responses=await pupilResponses(db,p.id);if(op==='progress')return json({status:s.status,responses});return json({pupil:{id:p.id,nickname:p.nickname,avatar:JSON.parse(p.avatar)},session:{id:s.id,title:s.title,status:s.status,sequential:s.sequential},activity:studentActivity(s.activity),responses});}
+   teacher(user);
+   if(op==='responses'){const {data:s,ref}=await ownedSession(db,url.searchParams.get('session'),user.uid);const [ps,rs]=await Promise.all([db.collection('pupils').where('session_id','==',ref.id).get(),db.collection('responses').where('session_id','==',ref.id).get()]);const pupils=ps.docs.map(d=>({id:d.id,nickname:d.data().nickname,avatar:d.data().avatar,created:d.data().created}));const names=new Map(pupils.map(p=>[p.id,p.nickname]));const responses=rs.docs.map(d=>({id:d.id,...d.data(),nickname:names.get(d.data().pupil_id)||'Murid'}));return json({pupils,responses,updated:now});}
+   const [as,ss]=await Promise.all([db.collection('activities').where('owner','==',user.uid).get(),db.collection('sessions').where('owner','==',user.uid).get()]);const activities=as.docs.map(d=>({id:d.id,...d.data()}));const sessions=ss.docs.map(d=>{const {activity,...s}=d.data();return{id:d.id,...s,count:s.count||0};});const newest=(a:any,b:any)=>b.created.localeCompare(a.created);return json({activities:activities.sort(newest),sessions:sessions.sort(newest)});
+  }
+  const origin=req.headers.get('origin');if(origin&&origin!==url.origin)throw new AppError('Permintaan tidak dibenarkan.',403);
+  if(Number(req.headers.get('content-length')||0)>65000)throw new AppError('Kandungan terlalu panjang.',413);
+  const raw=await req.text();if(raw.length>65000)throw new AppError('Kandungan terlalu panjang.',413);let b:any;try{b=JSON.parse(raw);}catch{throw new AppError('Permintaan tidak sah.');}
+  if(b.op==='join'){
+   const code=str(b.code,6).toUpperCase();if(!/^[A-Z2-9]{6}$/.test(code))throw new AppError('Semak kod sesi enam aksara.');const nickname=str(b.nickname,24);const avatar=JSON.stringify(b.avatar||{});if(avatar.length>1000)throw new AppError('Avatar tidak sah.');
+   const sref=db.collection('sessions').doc(code);const pid=createHash('sha256').update(user.uid+':'+code).digest('hex');const pref=db.collection('pupils').doc(pid);
+   const s=await db.runTransaction(async tx=>{const [ss,ps]=await Promise.all([tx.get(sref),tx.get(pref)]);if(!ss.exists||ss.data()!.status!=='Aktif')throw new AppError('Kod tidak sah, atau sesi belum bermula / telah tamat. Semak dengan cikgu.',404);const s=ss.data()!;if(!ps.exists){tx.create(pref,{uid:user.uid,session_id:code,nickname,avatar,created:now});tx.update(sref,{count:(s.count||0)+1});}else tx.update(pref,{nickname,avatar});tx.set(db.collection('memberships').doc(user.uid),{pupilId:pid});return s;});
+   return json({pupil:{id:pid,nickname,avatar:b.avatar},session:{id:code,title:s.title,status:s.status,sequential:s.sequential},activity:studentActivity(s.activity)});
+  }
+  if(b.op==='answer'){
+   const {p,s}=await participation(db,user.uid);const station=Number(b.station),qi=Number(b.question);const answer=str(b.answer,3000);const mode=['teks','suara','kad idea','gerakan','pilihan'].includes(b.mode)?b.mode:'teks';let evaluated;try{evaluated=checkAnswer(s.activity,station,qi,answer);}catch(e){throw new AppError((e as Error).message);}
+   const rid=`${p.id}:${station}:${qi}`,ref=db.collection('responses').doc(rid);
+   await db.runTransaction(async tx=>{const current=await tx.get(db.collection('sessions').doc(s.id));if(!current.exists||current.data()!.status!=='Aktif')throw new AppError('Sesi telah tamat. Jawapan ini belum disimpan. Hubungi cikgu.');if(current.data()!.sequential&&station>1){const needed=station-1<3?3:1;const previous=await Promise.all(Array.from({length:needed},(_,i)=>tx.get(db.collection('responses').doc(`${p.id}:${station-1}:${i}`))));if(previous.some(x=>!x.exists))throw new AppError('Lengkapkan stesen sebelumnya dahulu.');}tx.set(ref,{pupil_id:p.id,session_id:s.id,station,question:qi,answer,mode,score:evaluated.score,feedback:evaluated.feedback,final_score:null,review:'Perlu semakan guru',created:now});});return json({saved:true,id:rid,...evaluated});
+  }
+  teacher(user);
+  if(b.op==='save'){const activity=activitySchema.parse(b.activity),aid=b.id?docId(b.id):randomUUID();const ref=db.collection('activities').doc(aid);const status=b.approved?'Diluluskan':'Draf';await db.runTransaction(async tx=>{const prev=await tx.get(ref);if(b.id&&(!prev.exists||prev.data()!.owner!==user.uid))throw new AppError('Aktiviti tidak ditemui.',404);tx.set(ref,{owner:user.uid,body:activity,status,created:prev.data()?.created||now});});return json({id:aid,status});}
+  if(b.op==='session'){
+   const a=await db.collection('activities').doc(docId(b.activityId)).get();if(!a.exists||a.data()!.owner!==user.uid||a.data()!.status!=='Diluluskan')throw new AppError('Luluskan aktiviti sebelum mencipta sesi.');const chars='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+   for(let attempt=0;attempt<5;attempt++){const code=Array.from(randomBytes(6),x=>chars[x%chars.length]).join('');try{await db.collection('sessions').doc(code).create({owner:user.uid,code,title:a.data()!.body.title,activity:a.data()!.body,status:b.status==='Belum Bermula'?'Belum Bermula':'Aktif',sequential:b.sequential===false?0:1,count:0,created:now});return json({id:code,code});}catch(e:any){if(e.code!==6&&e.code!=='already-exists')throw e;}}
+   throw new AppError('Tidak dapat mencipta kod unik. Cuba lagi.',503);
+  }
+  if(b.op==='status'){const {ref}=await ownedSession(db,b.id,user.uid);if(!['Aktif','Belum Bermula','Tamat'].includes(b.status))throw new AppError('Status tidak sah.');await ref.update({status:b.status});return json({saved:true});}
+  if(b.op==='review'){const ref=db.collection('responses').doc(docId(b.id));const r=await ref.get();if(!r.exists)throw new AppError('Jawapan tidak ditemui.',404);await ownedSession(db,r.data()!.session_id,user.uid);const score=Number(b.score);if(!Number.isInteger(score)||score<0||score>1)throw new AppError('Markah mesti 0 atau 1.');await ref.update({final_score:score,review:'Disahkan guru',feedback:String(b.feedback||'Telah disemak oleh cikgu.').slice(0,1000)});return json({saved:true});}
+  if(b.op==='generate'){
+   if(!env.OPENAI_API_KEY)throw new AppError('Penjana OpenAI belum disambungkan. Tambah OPENAI_API_KEY dalam Cloudflare dan deploy semula.',503);
+   const input=activitySchema.parse(b.activity);
+   const system='Anda pembina draf aktiviti Bahasa Melayu inklusif sekolah rendah. Hasilkan JSON sahaja dengan semua keys dan jenis data seperti input. Ikuti tema title, year, skill, difficulty, sk, sp, supports dan emk. Tulis kandungan baharu sesuai umur. questions tepat 3 soalan berdasarkan audio, moves tepat 3 arahan pilihan. Setiap soalan mengandungi question, options 3 string, answer indeks 0-2 dan feedback. Sertakan objektif terukur, note, audio pendek, speaking bercapah, ideas 3 contoh, frame, examples, assessment. Jangan nilai loghat/kelajuan/kelantangan. Ini draf untuk guru semak.';
+   const model=env.OPENAI_MODEL||'gpt-4.1-mini';
+   let r:Response|undefined;
+   for(let attempt=0;attempt<2;attempt++){
+    r=await fetch('https://api.openai.com/v1/chat/completions',{method:'POST',signal:AbortSignal.timeout(25000),headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,'Content-Type':'application/json'},body:JSON.stringify({model,response_format:{type:'json_object'},messages:[{role:'system',content:system},{role:'user',content:JSON.stringify(input)}]})});
+    if(r.status<500||attempt===1)break;
+    console.warn('OpenAI returned a server error; retrying once');
+    await new Promise(resolve=>setTimeout(resolve,1000+Math.floor(Math.random()*500)));
+   }
+   if(!r?.ok){const status=r?.status||502;let detail='';try{const err:any=await r?.json();detail=String(err?.error?.code||err?.error?.type||'').slice(0,120);}catch{}console.error('OpenAI API request rejected',status,detail);if(status===400||status===401||status===403)throw new AppError('OpenAI menolak kunci atau permintaan. Semak OPENAI_API_KEY dan tetapan API Platform.',502);if(status===404)throw new AppError('Model OpenAI tidak ditemui. Semak nilai OPENAI_MODEL di Cloudflare.',502);if(status===429)throw new AppError('Kuota atau had permintaan OpenAI dicapai. Semak billing dan had penggunaan API Platform.',502);if(status>=500)throw new AppError(`Pelayan OpenAI sedang bermasalah (${status}). Sistem sudah cuba semula sekali; cuba lagi kemudian.`,502);throw new AppError(`OpenAI API membalas ralat ${status}. Semak kunci, model dan billing API.`,502);}
+   const data:any=await r.json();const text=data.choices?.[0]?.message?.content;if(!text)throw new AppError('OpenAI tidak memulangkan draf. Cuba jana semula.',502);return json({activity:activitySchema.parse(JSON.parse(text))});
+  }
+  throw new AppError('Tindakan tidak sah.');
+ }catch(e:any){if(e instanceof AppError)return json({error:e.message},e.status);if(e?.name==='ZodError')return json({error:'Semak semua medan aktiviti dan tiga soalan bagi setiap stesen.'},400);console.error('skuad function failed',e?.code||e?.name||'unknown');return json({error:'Operasi tidak berjaya. Input masih dikekalkan. Semak konfigurasi Firebase dan cuba lagi.'},500);}
+}
+
+export const onRequest=async(context:{request:Request;env:Env})=>handler(context.request,context.env);
