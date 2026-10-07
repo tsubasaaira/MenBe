@@ -179,7 +179,6 @@ async function handler(req:Request,env:Env):Promise<Response>{
 
    const itemSchema={
     type:'object',
-    additionalProperties:false,
     properties:{
      question:{type:'string',description:'Soalan sebenar dalam Bahasa Melayu, khusus kepada kandungan/topik. Jangan guna teks placeholder.'},
      options:{type:'array',minItems:3,maxItems:3,items:{type:'string',description:'Pilihan jawapan sebenar dan bermakna, bukan Pilihan 1/Pilihan 2/Pilihan 3.'}},
@@ -190,7 +189,6 @@ async function handler(req:Request,env:Env):Promise<Response>{
    };
    const stationSchema={
     type:'object',
-    additionalProperties:false,
     properties:{
      note:{type:'string',description:'Nota ringkas guru/murid yang khusus kepada topik dan aktiviti, sekurang-kurangnya 1-3 ayat bermakna.'},
      audio:{type:'string',description:'Cerita atau skrip audio lengkap dalam Bahasa Melayu Malaysia. Mesti mengandungi fakta/peristiwa yang cukup untuk menjawab ketiga-tiga soalan Stesen 1.'},
