@@ -161,9 +161,22 @@ async function handler(req:Request,env:Env):Promise<Response>{
   if(b.op==='generate'){
    if(!env.GEMINI_API_KEY)throw new AppError('Penjana Gemini belum disambungkan. Tambah GEMINI_API_KEY dalam Cloudflare dan deploy semula.',503);
    const input=activitySchema.parse(b.activity);
-   const system='Anda pembina draf aktiviti Bahasa Melayu inklusif sekolah rendah Malaysia. Hasilkan JSON sahaja dengan semua keys dan jenis data seperti input. Ikuti tema title, year, skill, difficulty, sk, sp, supports dan emk yang diberi guru. Tulis kandungan baharu yang sesuai untuk murid Tahun 2 atau Tahun 3. questions mesti tepat 3 soalan berdasarkan audio. moves mesti tepat 3 aktiviti pilihan untuk Stesen 2. Setiap soalan mengandungi question, options tepat 3 string, answer sebagai indeks 0 hingga 2, dan feedback ringkas. Sertakan objektif yang boleh diukur, note, audio pendek dan mudah didengar, speaking bercapah, ideas 3 contoh, frame, examples dan assessment. Gunakan Bahasa Melayu Malaysia yang mudah dan natural. Jangan nilai loghat, kelajuan atau kelantangan murid. Kandungan ialah draf dan mesti disemak guru sebelum diluluskan.';
+   // Hantar hanya maklumat guru kepada AI. Jangan hantar kandungan stesen lama/sample,
+   // supaya Gemini benar-benar menjana aktiviti baharu berdasarkan tajuk, tahun dan aras.
+   const brief={
+    title:input.title,
+    year:input.year,
+    difficulty:input.difficulty,
+    skill:input.skill,
+    sk:input.sk,
+    sp:input.sp,
+    objectives:input.objectives,
+    emk:input.emk,
+    supports:input.supports
+   };
+   const system='Anda pembina draf aktiviti Bahasa Melayu inklusif sekolah rendah Malaysia. Hasilkan SATU aktiviti BAHARU sepenuhnya berdasarkan maklumat guru. Jangan salin, ulang atau mengekalkan kandungan contoh/default yang pernah ada dalam sistem. Tajuk/topik, tahun dan tahap kesukaran ialah arahan utama dan semua kandungan Stesen 1, 2 dan 3 mesti berkait jelas dengan tajuk tersebut serta sesuai dengan umur dan aras murid. Pulangkan JSON sahaja dengan keys: title, year, skill, difficulty, sk, sp, objectives, note, audio, questions, moves, speaking, ideas, frame, examples, supports, emk, assessment. Kekalkan title, year dan difficulty tepat seperti yang diberi guru. Jika SK, SP, objectives atau emk diberi, selaraskan dan perkemaskan mengikut topik; jika terlalu umum, hasilkan cadangan yang lebih sesuai. Stesen 1: cipta note dan audio baharu, kemudian tepat 3 questions yang hanya boleh dijawab berdasarkan audio. Stesen 2: cipta tepat 3 moves yang berkait dengan topik, sesuai untuk perkataan bergerak dan aktiviti pilihan. Stesen 3: cipta satu soalan bertutur bercapah, 3 kad idea, ayat rangka, contoh jawapan dan cadangan pentaksiran. Setiap item questions dan moves mesti ada question, options tepat 3 string, answer indeks 0 hingga 2, dan feedback ringkas. Gunakan Bahasa Melayu Malaysia yang mudah, natural dan sesuai tahap murid. Kesukaran Asas = ayat dan konsep sangat mudah; Sederhana = memerlukan sedikit inferens; Tinggi = memerlukan alasan atau pemikiran lebih mendalam tetapi masih sesuai umur. Jangan nilai loghat, kelajuan atau kelantangan murid. Kandungan ialah draf dan mesti disemak guru sebelum diluluskan.';
    const model=env.GEMINI_MODEL||'gemini-2.5-flash-lite';
-   const prompt=`${system}\n\nMaklumat dan draf semasa daripada guru:\n${JSON.stringify(input)}`;
+   const prompt=`${system}\n\nMAKLUMAT AKTIVITI DARIPADA GURU (ini sahaja sumber kandungan):\n${JSON.stringify(brief)}`;
    let r:Response|undefined;
    for(let attempt=0;attempt<2;attempt++){
     r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,{
@@ -171,7 +184,7 @@ async function handler(req:Request,env:Env):Promise<Response>{
      headers:{'Content-Type':'application/json','x-goog-api-key':env.GEMINI_API_KEY},
      body:JSON.stringify({
       contents:[{role:'user',parts:[{text:prompt}]}],
-      generationConfig:{responseMimeType:'application/json',temperature:0.7,maxOutputTokens:8192}
+      generationConfig:{responseMimeType:'application/json',temperature:0.9,maxOutputTokens:8192}
      })
     });
     if(r.status<500||attempt===1)break;
