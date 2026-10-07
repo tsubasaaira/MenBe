@@ -22,7 +22,7 @@ async function api(op:string,data?:any){
  const token=await bearer();
  if(!firebaseReady){if(op==='op=me')return {user:null,ai:false};throw new Error('Firebase belum dikonfigurasi. Mod contoh masih boleh dimainkan. Ikuti PANDUAN_NETLIFY.md untuk sesi sebenar.');}
  let res;try{res=await fetch(`/api/skuad${data?'':`?${op}`}`,{method:data?'POST':'GET',cache:'no-store',headers:{...(token?{Authorization:`Bearer ${token}`}:{}) ,...(data?{'Content-Type':'application/json'}:{})},...(data?{body:JSON.stringify({op,...data})}:{})});}catch{throw new Error('Sambungan terputus. Jawapan masih di skrin. Cuba lagi apabila bersambung.');}
- const type=res.headers.get('content-type')||'';if(!type.includes('application/json'))throw new Error('Backend Netlify Functions belum tersedia. Deploy melalui Git atau Netlify CLI; muat naik dist sahaja hanya menyokong mod contoh.');
+ const type=res.headers.get('content-type')||'';if(!type.includes('application/json'))throw new Error('Backend Cloudflare Pages Functions belum tersedia. Pastikan folder /functions telah dideploy bersama project Cloudflare Pages.');
  const body:any=await res.json();if(!res.ok)throw new Error(body.error||'Tidak berjaya. Sila cuba lagi.');return body;
 }
 function Picker({label,value,options,onChange}:{label:string;value:string;options:string[];onChange:(s:string)=>void}){return <label className="field"><span>{label}</span><Select value={value} onValueChange={onChange}><SelectTrigger className="pick"><SelectValue/></SelectTrigger><SelectContent>{options.map(s=><SelectItem key={s} value={s}>{s}</SelectItem>)}</SelectContent></Select></label>;}
