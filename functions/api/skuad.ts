@@ -85,7 +85,7 @@ async function handler(req:Request,env:Env):Promise<Response>{
    const data:any=await r.json();const text=data.choices?.[0]?.message?.content;if(!text)throw new AppError('OpenAI tidak memulangkan draf. Cuba jana semula.',502);return json({activity:activitySchema.parse(JSON.parse(text))});
   }
   throw new AppError('Tindakan tidak sah.');
- }catch(e:any){if(e instanceof AppError)return json({error:e.message},e.status);if(e?.name==='ZodError')return json({error:'Semak semua medan aktiviti dan tiga soalan bagi setiap stesen.'},400);console.error('skuad function failed',e?.code||e?.name||'unknown',e?.message||'');const detail=String(e?.code||e?.name||'unknown').slice(0,120);return json({error:`Operasi Firestore gagal (${detail}). Input masih dikekalkan.`},500);}
+ }catch(e:any){if(e instanceof AppError)return json({error:e.message},e.status);if(e?.name==='ZodError')return json({error:'Semak semua medan aktiviti dan tiga soalan bagi setiap stesen.'},400);console.error('skuad function failed',e?.code||e?.name||'unknown',e?.message||'',e?.cause?.message||'');const code=String(e?.code||e?.name||'Error').slice(0,80);const rawMsg=String(e?.message||e?.cause?.message||'Tiada butiran tambahan.').replace(/[\r\n]+/g,' ').replace(/-----BEGIN[^-]+-----.*?-----END[^-]+-----/g,'[REDACTED]').slice(0,240);return json({error:`Operasi Firestore gagal (${code}): ${rawMsg}`},500);}
 }
 
 export const onRequest=async(context:{request:Request;env:Env})=>handler(context.request,context.env);
