@@ -1,12 +1,25 @@
 import {initializeApp,getApps,cert} from 'firebase-admin/app';
-import {getFirestore,type Firestore} from 'firebase-admin/firestore';
+import {initializeFirestore,type Firestore} from 'firebase-admin/firestore';
 import {randomUUID,randomBytes,createHash} from 'node:crypto';
 import {activitySchema,type Activity} from '../../lib/activity';
 import {studentActivity,checkAnswer,isTeacher} from '../../lib/server-rules';
 class AppError extends Error {constructor(message:string,public status=400){super(message);}}
 const json=(body:unknown,status=200)=>Response.json(body,{status,headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
 type Env={FIREBASE_SERVICE_ACCOUNT_JSON?:string;OPENAI_API_KEY?:string;OPENAI_MODEL?:string};
-function setup(env:Env){if(!getApps().length){const value=env.FIREBASE_SERVICE_ACCOUNT_JSON;if(!value)throw new AppError('Firebase pelayan belum dikonfigurasi. Tambah FIREBASE_SERVICE_ACCOUNT_JSON dalam Cloudflare.',503);let key;try{key=JSON.parse(value);}catch{throw new AppError('Format FIREBASE_SERVICE_ACCOUNT_JSON tidak sah.',503);}initializeApp({credential:cert(key)});}return getFirestore();}
+let firestoreDb:Firestore|undefined;
+function setup(env:Env){
+ if(firestoreDb)return firestoreDb;
+ let app=getApps()[0];
+ if(!app){
+  const value=env.FIREBASE_SERVICE_ACCOUNT_JSON;
+  if(!value)throw new AppError('Firebase pelayan belum dikonfigurasi. Tambah FIREBASE_SERVICE_ACCOUNT_JSON dalam Cloudflare.',503);
+  let key;
+  try{key=JSON.parse(value);}catch{throw new AppError('Format FIREBASE_SERVICE_ACCOUNT_JSON tidak sah.',503);}
+  app=initializeApp({credential:cert(key)});
+ }
+ firestoreDb=initializeFirestore(app,{preferRest:true});
+ return firestoreDb;
+}
 function str(v:unknown,max=5000){if(typeof v!=='string'||!v.trim()||v.length>max)throw new AppError('Sila lengkapkan maklumat dengan betul.');return v.trim();}
 function docId(v:unknown){const s=str(v,160);if(!/^[a-zA-Z0-9:_-]+$/.test(s))throw new AppError('ID tidak sah.');return s;}
 type AuthUser={uid:string;sub:string;email?:string;name?:string;email_verified?:boolean;firebase:{sign_in_provider?:string;[key:string]:unknown};aud:string;iss:string;exp:number;iat:number;auth_time?:number;[key:string]:unknown};
@@ -48,7 +61,7 @@ async function handler(req:Request,env:Env):Promise<Response>{
    await db.runTransaction(async tx=>{const current=await tx.get(db.collection('sessions').doc(s.id));if(!current.exists||current.data()!.status!=='Aktif')throw new AppError('Sesi telah tamat. Jawapan ini belum disimpan. Hubungi cikgu.');if(current.data()!.sequential&&station>1){const needed=station-1<3?3:1;const previous=await Promise.all(Array.from({length:needed},(_,i)=>tx.get(db.collection('responses').doc(`${p.id}:${station-1}:${i}`))));if(previous.some(x=>!x.exists))throw new AppError('Lengkapkan stesen sebelumnya dahulu.');}tx.set(ref,{pupil_id:p.id,session_id:s.id,station,question:qi,answer,mode,score:evaluated.score,feedback:evaluated.feedback,final_score:null,review:'Perlu semakan guru',created:now});});return json({saved:true,id:rid,...evaluated});
   }
   teacher(user);
-  if(b.op==='save'){const activity=activitySchema.parse(b.activity),aid=b.id?docId(b.id):randomUUID();const ref=db.collection('activities').doc(aid);const status=b.approved?'Diluluskan':'Draf';await db.runTransaction(async tx=>{const prev=await tx.get(ref);if(b.id&&(!prev.exists||prev.data()!.owner!==user.uid))throw new AppError('Aktiviti tidak ditemui.',404);tx.set(ref,{owner:user.uid,body:activity,status,created:prev.data()?.created||now});});return json({id:aid,status});}
+  if(b.op==='save'){const activity=activitySchema.parse(b.activity),aid=b.id?docId(b.id):randomUUID();const ref=db.collection('activities').doc(aid);const status=b.approved?'Diluluskan':'Draf';const prev=await ref.get();if(b.id&&(!prev.exists||prev.data()!.owner!==user.uid))throw new AppError('Aktiviti tidak ditemui.',404);await ref.set({owner:user.uid,body:activity,status,created:prev.data()?.created||now});return json({id:aid,status});}
   if(b.op==='session'){
    const a=await db.collection('activities').doc(docId(b.activityId)).get();if(!a.exists||a.data()!.owner!==user.uid||a.data()!.status!=='Diluluskan')throw new AppError('Luluskan aktiviti sebelum mencipta sesi.');const chars='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
    for(let attempt=0;attempt<5;attempt++){const code=Array.from(randomBytes(6),x=>chars[x%chars.length]).join('');try{await db.collection('sessions').doc(code).create({owner:user.uid,code,title:a.data()!.body.title,activity:a.data()!.body,status:b.status==='Belum Bermula'?'Belum Bermula':'Aktif',sequential:b.sequential===false?0:1,count:0,created:now});return json({id:code,code});}catch(e:any){if(e.code!==6&&e.code!=='already-exists')throw e;}}
@@ -72,7 +85,7 @@ async function handler(req:Request,env:Env):Promise<Response>{
    const data:any=await r.json();const text=data.choices?.[0]?.message?.content;if(!text)throw new AppError('OpenAI tidak memulangkan draf. Cuba jana semula.',502);return json({activity:activitySchema.parse(JSON.parse(text))});
   }
   throw new AppError('Tindakan tidak sah.');
- }catch(e:any){if(e instanceof AppError)return json({error:e.message},e.status);if(e?.name==='ZodError')return json({error:'Semak semua medan aktiviti dan tiga soalan bagi setiap stesen.'},400);console.error('skuad function failed',e?.code||e?.name||'unknown');return json({error:'Operasi tidak berjaya. Input masih dikekalkan. Semak konfigurasi Firebase dan cuba lagi.'},500);}
+ }catch(e:any){if(e instanceof AppError)return json({error:e.message},e.status);if(e?.name==='ZodError')return json({error:'Semak semua medan aktiviti dan tiga soalan bagi setiap stesen.'},400);console.error('skuad function failed',e?.code||e?.name||'unknown',e?.message||'');const detail=String(e?.code||e?.name||'unknown').slice(0,120);return json({error:`Operasi Firestore gagal (${detail}). Input masih dikekalkan.`},500);}
 }
 
 export const onRequest=async(context:{request:Request;env:Env})=>handler(context.request,context.env);
