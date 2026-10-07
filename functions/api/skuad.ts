@@ -3,7 +3,7 @@ import {studentActivity,checkAnswer,isTeacher} from '../../lib/server-rules';
 
 class AppError extends Error {constructor(message:string,public status=400){super(message);}}
 const json=(body:unknown,status=200)=>Response.json(body,{status,headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
-type Env={FIREBASE_SERVICE_ACCOUNT_JSON?:string;OPENAI_API_KEY?:string;OPENAI_MODEL?:string};
+type Env={FIREBASE_SERVICE_ACCOUNT_JSON?:string;GEMINI_API_KEY?:string;GEMINI_MODEL?:string};
 type ServiceAccount={project_id:string;client_email:string;private_key:string;token_uri?:string};
 type AuthUser={uid:string;sub:string;email?:string;name?:string;email_verified?:boolean;firebase:{sign_in_provider?:string;[key:string]:unknown};aud:string;iss:string;exp:number;iat:number;auth_time?:number;[key:string]:unknown};
 type FsDoc={id:string;[key:string]:any};
@@ -120,10 +120,10 @@ async function handler(req:Request,env:Env):Promise<Response>{
  try{
   const url=new URL(req.url);const op=url.searchParams.get('op');
   if(!['GET','POST'].includes(req.method))return json({error:'Kaedah tidak dibenarkan.'},405);
-  if(req.method==='GET'&&op==='me'&&!req.headers.get('authorization'))return json({user:null,ai:!!env.OPENAI_API_KEY});
+  if(req.method==='GET'&&op==='me'&&!req.headers.get('authorization'))return json({user:null,ai:!!env.GEMINI_API_KEY});
   const user=await identity(req,env);const now=new Date().toISOString();
   if(req.method==='GET'){
-   if(op==='me'){if(user.firebase.sign_in_provider==='anonymous')return json({user:null,ai:!!env.OPENAI_API_KEY});teacher(user);return json({user:{name:user.name||'Cikgu',email:user.email},ai:!!env.OPENAI_API_KEY});}
+   if(op==='me'){if(user.firebase.sign_in_provider==='anonymous')return json({user:null,ai:!!env.GEMINI_API_KEY});teacher(user);return json({user:{name:user.name||'Cikgu',email:user.email},ai:!!env.GEMINI_API_KEY});}
    if(op==='restore'||op==='progress'){const {p,s}=await participation(env,user.uid);const responses=await pupilResponses(env,p.id);if(op==='progress')return json({status:s.status,responses});return json({pupil:{id:p.id,nickname:p.nickname,avatar:JSON.parse(p.avatar)},session:{id:s.id,title:s.title,status:s.status,sequential:s.sequential},activity:studentActivity(s.activity),responses});}
    teacher(user);
    if(op==='responses'){const {id}=await ownedSession(env,url.searchParams.get('session'),user.uid);const [pupilsRaw,responsesRaw]=await Promise.all([fsQuery(env,'pupils','session_id',id),fsQuery(env,'responses','session_id',id)]);const pupils=pupilsRaw.map(p=>({id:p.id,nickname:p.nickname,avatar:p.avatar,created:p.created}));const names=new Map(pupils.map(p=>[p.id,p.nickname]));const responses=responsesRaw.map(r=>({...r,nickname:names.get(r.pupil_id)||'Murid'}));return json({pupils,responses,updated:now});}
@@ -159,13 +159,44 @@ async function handler(req:Request,env:Env):Promise<Response>{
   if(b.op==='status'){const {id}=await ownedSession(env,b.id,user.uid);if(!['Aktif','Belum Bermula','Tamat'].includes(b.status))throw new AppError('Status tidak sah.');await fsUpdate(env,'sessions',id,{status:b.status});return json({saved:true});}
   if(b.op==='review'){const id=docId(b.id),r=await fsGet(env,'responses',id);if(!r)throw new AppError('Jawapan tidak ditemui.',404);await ownedSession(env,r.session_id,user.uid);const score=Number(b.score);if(!Number.isInteger(score)||score<0||score>1)throw new AppError('Markah mesti 0 atau 1.');await fsUpdate(env,'responses',id,{final_score:score,review:'Disahkan guru',feedback:String(b.feedback||'Telah disemak oleh cikgu.').slice(0,1000)});return json({saved:true});}
   if(b.op==='generate'){
-   if(!env.OPENAI_API_KEY)throw new AppError('Penjana OpenAI belum disambungkan. Tambah OPENAI_API_KEY dalam Cloudflare dan deploy semula.',503);
+   if(!env.GEMINI_API_KEY)throw new AppError('Penjana Gemini belum disambungkan. Tambah GEMINI_API_KEY dalam Cloudflare dan deploy semula.',503);
    const input=activitySchema.parse(b.activity);
-   const system='Anda pembina draf aktiviti Bahasa Melayu inklusif sekolah rendah. Hasilkan JSON sahaja dengan semua keys dan jenis data seperti input. Ikuti tema title, year, skill, difficulty, sk, sp, supports dan emk. Tulis kandungan baharu sesuai umur. questions tepat 3 soalan berdasarkan audio, moves tepat 3 arahan pilihan. Setiap soalan mengandungi question, options 3 string, answer indeks 0-2 dan feedback. Sertakan objektif terukur, note, audio pendek, speaking bercapah, ideas 3 contoh, frame, examples, assessment. Jangan nilai loghat/kelajuan/kelantangan. Ini draf untuk guru semak.';
-   const model=env.OPENAI_MODEL||'gpt-4.1-mini';let r:Response|undefined;
-   for(let attempt=0;attempt<2;attempt++){r=await fetch('https://api.openai.com/v1/chat/completions',{method:'POST',signal:AbortSignal.timeout(25000),headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,'Content-Type':'application/json'},body:JSON.stringify({model,response_format:{type:'json_object'},messages:[{role:'system',content:system},{role:'user',content:JSON.stringify(input)}]})});if(r.status<500||attempt===1)break;await new Promise(resolve=>setTimeout(resolve,1000+Math.floor(Math.random()*500)));}
-   if(!r?.ok){const status=r?.status||502;let detail='';try{const err:any=await r?.json();detail=String(err?.error?.code||err?.error?.type||'').slice(0,120);}catch{}console.error('OpenAI API request rejected',status,detail);if(status===400||status===401||status===403)throw new AppError('OpenAI menolak kunci atau permintaan. Semak OPENAI_API_KEY dan tetapan API Platform.',502);if(status===404)throw new AppError('Model OpenAI tidak ditemui. Semak nilai OPENAI_MODEL di Cloudflare.',502);if(status===429)throw new AppError('Kuota atau had permintaan OpenAI dicapai. Semak billing dan had penggunaan API Platform.',502);if(status>=500)throw new AppError(`Pelayan OpenAI sedang bermasalah (${status}). Sistem sudah cuba semula sekali; cuba lagi kemudian.`,502);throw new AppError(`OpenAI API membalas ralat ${status}. Semak kunci, model dan billing API.`,502);}
-   const data:any=await r.json();const text=data.choices?.[0]?.message?.content;if(!text)throw new AppError('OpenAI tidak memulangkan draf. Cuba jana semula.',502);return json({activity:activitySchema.parse(JSON.parse(text))});
+   const system='Anda pembina draf aktiviti Bahasa Melayu inklusif sekolah rendah Malaysia. Hasilkan JSON sahaja dengan semua keys dan jenis data seperti input. Ikuti tema title, year, skill, difficulty, sk, sp, supports dan emk yang diberi guru. Tulis kandungan baharu yang sesuai untuk murid Tahun 2 atau Tahun 3. questions mesti tepat 3 soalan berdasarkan audio. moves mesti tepat 3 aktiviti pilihan untuk Stesen 2. Setiap soalan mengandungi question, options tepat 3 string, answer sebagai indeks 0 hingga 2, dan feedback ringkas. Sertakan objektif yang boleh diukur, note, audio pendek dan mudah didengar, speaking bercapah, ideas 3 contoh, frame, examples dan assessment. Gunakan Bahasa Melayu Malaysia yang mudah dan natural. Jangan nilai loghat, kelajuan atau kelantangan murid. Kandungan ialah draf dan mesti disemak guru sebelum diluluskan.';
+   const model=env.GEMINI_MODEL||'gemini-2.5-flash-lite';
+   const prompt=`${system}\n\nMaklumat dan draf semasa daripada guru:\n${JSON.stringify(input)}`;
+   let r:Response|undefined;
+   for(let attempt=0;attempt<2;attempt++){
+    r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,{
+     method:'POST',signal:AbortSignal.timeout(30000),
+     headers:{'Content-Type':'application/json','x-goog-api-key':env.GEMINI_API_KEY},
+     body:JSON.stringify({
+      contents:[{role:'user',parts:[{text:prompt}]}],
+      generationConfig:{responseMimeType:'application/json',temperature:0.7,maxOutputTokens:8192}
+     })
+    });
+    if(r.status<500||attempt===1)break;
+    await new Promise(resolve=>setTimeout(resolve,1000+Math.floor(Math.random()*500)));
+   }
+   if(!r?.ok){
+    const status=r?.status||502;let detail='';
+    try{const err:any=await r?.json();detail=String(err?.error?.message||err?.error?.status||'').slice(0,180);}catch{}
+    console.error('Gemini API request rejected',status,detail);
+    if(status===400)throw new AppError(`Gemini menolak permintaan. ${detail||'Semak format input atau model.'}`,502);
+    if(status===401||status===403)throw new AppError('Gemini menolak API key. Semak GEMINI_API_KEY dalam Cloudflare.',502);
+    if(status===404)throw new AppError('Model Gemini tidak ditemui. Semak GEMINI_MODEL dalam Cloudflare.',502);
+    if(status===429)throw new AppError('Had atau kuota Gemini dicapai. Tunggu sebentar dan cuba lagi, atau semak kuota projek Google AI Studio.',502);
+    if(status>=500)throw new AppError(`Pelayan Gemini sedang bermasalah (${status}). Sistem sudah cuba semula sekali; cuba lagi kemudian.`,502);
+    throw new AppError(`Gemini API membalas ralat ${status}${detail?': '+detail:''}.`,502);
+   }
+   const data:any=await r.json();
+   const text=(data?.candidates?.[0]?.content?.parts||[]).map((p:any)=>p?.text||'').join('').trim();
+   if(!text){
+    const reason=String(data?.candidates?.[0]?.finishReason||data?.promptFeedback?.blockReason||'').slice(0,100);
+    throw new AppError(`Gemini tidak memulangkan draf${reason?` (${reason})`:''}. Cuba jana semula.`,502);
+   }
+   let generated:any;
+   try{generated=JSON.parse(text);}catch{throw new AppError('Gemini memulangkan format yang tidak dapat dibaca. Cuba jana semula.',502);}
+   try{return json({activity:activitySchema.parse(generated)});}catch(e:any){console.error('Gemini activity validation failed',e?.message||e);throw new AppError('Draf Gemini tidak lengkap atau format aktiviti tidak tepat. Cuba jana semula.',502);}
   }
   throw new AppError('Tindakan tidak sah.');
  }catch(e:any){
