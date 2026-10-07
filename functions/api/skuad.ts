@@ -211,35 +211,69 @@ async function handler(req:Request,env:Env):Promise<Response>{
    try{generated=JSON.parse(text);}catch{throw new AppError('Gemini memulangkan format JSON yang tidak dapat dibaca. Cuba jana semula.',502);}
 
    const asText=(v:any)=>typeof v==='string'?v.trim():String(v??'').trim();
-   const normalizeQuestion=(q:any)=>{
-    const options=Array.isArray(q?.options)?q.options.map((x:any)=>asText(x)).filter(Boolean).slice(0,3):[];
+   const topic=asText(brief.title)||'topik pembelajaran';
+   const ensureLong=(value:any,fallback:string,min=10)=>{
+    const t=asText(value);return t.length>=min?t:fallback;
+   };
+   const normalizeQuestion=(q:any,kind:'question'|'move',index:number)=>{
+    let question=asText(q?.question);
+    let options=Array.isArray(q?.options)?q.options.map((x:any)=>asText(x)).filter(Boolean).slice(0,3):[];
     let answer=Number(q?.answer);
     if(!Number.isInteger(answer)&&typeof q?.answer==='string'){
      const idx=options.findIndex((x:string)=>x.toLowerCase()===q.answer.trim().toLowerCase());
      answer=idx>=0?idx:0;
     }
-    return {question:asText(q?.question),options,answer,feedback:asText(q?.feedback)};
+    const questionFallbacks=[
+     `Apakah topik utama yang dipelajari dalam aktiviti ini?`,
+     `Pilih pernyataan yang paling berkaitan dengan topik ${topic}.`,
+     `Apakah tindakan atau idea yang sesuai dengan topik ${topic}?`
+    ];
+    const moveFallbacks=[
+     `Pilih perkataan atau idea yang paling berkaitan dengan ${topic}.`,
+     `Pilih jawapan yang sesuai untuk aktiviti ${topic}.`,
+     `Pilih pilihan yang menunjukkan kefahaman tentang ${topic}.`
+    ];
+    if(question.length<3)question=(kind==='move'?moveFallbacks:questionFallbacks)[index%3];
+    const defaults=[topic,'Pilihan yang tidak berkaitan','Pilihan lain'];
+    while(options.length<3)options.push(defaults[options.length]||`Pilihan ${options.length+1}`);
+    options=options.slice(0,3);
+    if(!Number.isInteger(answer)||answer<0||answer>2)answer=0;
+    let feedback=asText(q?.feedback);
+    if(!feedback)feedback=answer===0?`Bagus! Jawapan ini berkaitan dengan ${topic}.`:`Semak semula pilihan yang paling berkaitan dengan ${topic}.`;
+    return {question,options,answer,feedback};
    };
-   const buildActivity=(g:any)=>({
-    title:brief.title,
-    year:brief.year,
-    skill:brief.skill,
-    difficulty:brief.difficulty,
-    sk:brief.sk,
-    sp:brief.sp,
-    objectives:brief.objectives,
-    note:asText(g?.note),
-    audio:asText(g?.audio),
-    questions:Array.isArray(g?.questions)?g.questions.slice(0,3).map(normalizeQuestion):[],
-    moves:Array.isArray(g?.moves)?g.moves.slice(0,3).map(normalizeQuestion):[],
-    speaking:asText(g?.speaking),
-    ideas:Array.isArray(g?.ideas)?g.ideas.map((x:any)=>asText(x)).filter(Boolean).slice(0,3):[],
-    frame:asText(g?.frame),
-    examples:asText(g?.examples),
-    supports:brief.supports,
-    emk:brief.emk,
-    assessment:asText(g?.assessment)
-   });
+   const ensureThree=(arr:any,kind:'question'|'move')=>{
+    const src=Array.isArray(arr)?arr:[];const out=[] as any[];
+    for(let i=0;i<3;i++)out.push(normalizeQuestion(src[i]||{},kind,i));
+    return out;
+   };
+   const buildActivity=(g:any)=>{
+    const noteFallback=`Aktiviti ini membantu murid memahami topik ${topic} melalui aktiviti mendengar, memilih jawapan dan bertutur secara mudah.`;
+    const audioFallback=`Dengar dengan teliti. Hari ini kita belajar tentang ${topic}. Murid akan mengenal maklumat penting, memilih jawapan yang sesuai dan berkongsi idea tentang ${topic}.`;
+    const ideaSource=Array.isArray(g?.ideas)?g.ideas.map((x:any)=>asText(x)).filter(Boolean):[];
+    const ideaDefaults=[`Saya tahu sesuatu tentang ${topic}.`,`Saya boleh beri contoh berkaitan ${topic}.`,`Saya boleh terangkan idea saya tentang ${topic}.`];
+    while(ideaSource.length<3)ideaSource.push(ideaDefaults[ideaSource.length]);
+    return {
+     title:brief.title,
+     year:brief.year,
+     skill:brief.skill,
+     difficulty:brief.difficulty,
+     sk:brief.sk,
+     sp:brief.sp,
+     objectives:brief.objectives,
+     note:ensureLong(g?.note,noteFallback),
+     audio:ensureLong(g?.audio,audioFallback),
+     questions:ensureThree(g?.questions,'question'),
+     moves:ensureThree(g?.moves,'move'),
+     speaking:ensureLong(g?.speaking,`Ceritakan satu idea atau pengalaman kamu yang berkaitan dengan ${topic}.`,5),
+     ideas:ideaSource.slice(0,3),
+     frame:asText(g?.frame)||'Pada pendapat saya, … kerana …',
+     examples:asText(g?.examples)||`Contoh: Saya boleh menerangkan satu perkara yang saya tahu tentang ${topic}.`,
+     supports:brief.supports,
+     emk:brief.emk,
+     assessment:asText(g?.assessment)||'Semak kefahaman, ketepatan jawapan dan kerelevanan idea murid. Terima jawapan munasabah dan berikan peluang mencuba semula.'
+    };
+   };
 
    let draft=buildActivity(generated);
    let checked=activitySchema.safeParse(draft);
@@ -257,9 +291,14 @@ async function handler(req:Request,env:Env):Promise<Response>{
     }
    }
    if(!checked.success){
-    const detail=checked.error.issues.slice(0,4).map((x:any)=>`${x.path.join('.')}: ${x.message}`).join('; ');
-    console.error('Gemini activity validation failed',detail);
-    throw new AppError(`Draf Gemini masih tidak lengkap (${detail}). Cuba jana semula.`,502);
+    // Repair terakhir dibuat secara deterministic supaya output AI yang tidak lengkap
+    // tetap menjadi struktur aktiviti yang sah tanpa meminta guru jana berulang kali.
+    draft=buildActivity(generated);checked=activitySchema.safeParse(draft);
+   }
+   if(!checked.success){
+    const detail=checked.error.issues.slice(0,6).map((x:any)=>`${x.path.join('.')}: ${x.message}`).join('; ');
+    console.error('Gemini activity validation failed after deterministic repair',detail);
+    throw new AppError(`Draf Gemini tidak dapat dibaiki (${detail}). Cuba jana semula.`,502);
    }
    return json({activity:checked.data});
   }
