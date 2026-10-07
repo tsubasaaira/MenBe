@@ -161,8 +161,6 @@ async function handler(req:Request,env:Env):Promise<Response>{
   if(b.op==='generate'){
    if(!env.GEMINI_API_KEY)throw new AppError('Penjana Gemini belum disambungkan. Tambah GEMINI_API_KEY dalam Cloudflare dan deploy semula.',503);
    const input=activitySchema.parse(b.activity);
-   // Hantar hanya maklumat guru kepada AI. Jangan hantar kandungan stesen lama/sample,
-   // supaya Gemini benar-benar menjana aktiviti baharu berdasarkan tajuk, tahun dan aras.
    const brief={
     title:input.title,
     year:input.year,
@@ -174,131 +172,130 @@ async function handler(req:Request,env:Env):Promise<Response>{
     emk:input.emk,
     supports:input.supports
    };
-   const system='Anda pembina draf aktiviti Bahasa Melayu inklusif sekolah rendah Malaysia. Jana KANDUNGAN STESEN SAHAJA berdasarkan maklumat guru. Jangan pulangkan title, year, skill, difficulty, sk, sp, objectives, supports atau emk kerana sistem akan mengekalkan medan guru secara automatik. Pulangkan JSON sahaja dengan keys tepat ini: note, audio, questions, moves, speaking, ideas, frame, examples, assessment. Stesen 1: note dan audio baharu yang jelas berkait dengan topik, kemudian tepat 3 questions yang hanya boleh dijawab berdasarkan audio. Stesen 2: tepat 3 moves yang berkait dengan topik dan sesuai untuk aktiviti pilihan perkataan bergerak. Stesen 3: satu soalan bertutur bercapah, tepat 3 kad idea, satu ayat rangka, contoh jawapan dan cadangan pentaksiran. Setiap item dalam questions dan moves WAJIB berbentuk {question:string, options:[string,string,string], answer:0|1|2, feedback:string}. options mesti TEPAT 3 pilihan dan answer mesti nombor indeks 0, 1 atau 2. Gunakan Bahasa Melayu Malaysia yang mudah dan natural. Kesukaran Asas = ayat dan konsep sangat mudah; Sederhana = sedikit inferens; Tinggi = perlu alasan/pemikiran lebih mendalam tetapi masih sesuai umur. Jangan nilai loghat, kelajuan atau kelantangan murid. Kandungan ialah draf dan mesti disemak guru.';
+   const topic=String(brief.title||'').trim();
+   const level=String(brief.difficulty||'Asas').trim();
+   const year=String(brief.year||'2').trim();
    const model=env.GEMINI_MODEL||'gemini-2.5-flash-lite';
-   const prompt=`${system}\n\nMAKLUMAT AKTIVITI DARIPADA GURU (ini sahaja sumber kandungan):\n${JSON.stringify(brief)}`;
-   let r:Response|undefined;
-   for(let attempt=0;attempt<2;attempt++){
-    r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,{
-     method:'POST',signal:AbortSignal.timeout(30000),
-     headers:{'Content-Type':'application/json','x-goog-api-key':env.GEMINI_API_KEY},
-     body:JSON.stringify({
-      contents:[{role:'user',parts:[{text:prompt}]}],
-      generationConfig:{responseMimeType:'application/json',temperature:0.9,maxOutputTokens:8192}
-     })
-    });
-    if(r.status<500||attempt===1)break;
-    await new Promise(resolve=>setTimeout(resolve,1000+Math.floor(Math.random()*500)));
-   }
-   if(!r?.ok){
-    const status=r?.status||502;let detail='';
-    try{const err:any=await r?.json();detail=String(err?.error?.message||err?.error?.status||'').slice(0,180);}catch{}
-    console.error('Gemini API request rejected',status,detail);
-    if(status===400)throw new AppError(`Gemini menolak permintaan. ${detail||'Semak format input atau model.'}`,502);
-    if(status===401||status===403)throw new AppError('Gemini menolak API key. Semak GEMINI_API_KEY dalam Cloudflare.',502);
-    if(status===404)throw new AppError('Model Gemini tidak ditemui. Semak GEMINI_MODEL dalam Cloudflare.',502);
-    if(status===429)throw new AppError('Had atau kuota Gemini dicapai. Tunggu sebentar dan cuba lagi, atau semak kuota projek Google AI Studio.',502);
-    if(status>=500)throw new AppError(`Pelayan Gemini sedang bermasalah (${status}). Sistem sudah cuba semula sekali; cuba lagi kemudian.`,502);
-    throw new AppError(`Gemini API membalas ralat ${status}${detail?': '+detail:''}.`,502);
-   }
-   const data:any=await r.json();
-   const text=(data?.candidates?.[0]?.content?.parts||[]).map((p:any)=>p?.text||'').join('').trim();
-   if(!text){
-    const reason=String(data?.candidates?.[0]?.finishReason||data?.promptFeedback?.blockReason||'').slice(0,100);
-    throw new AppError(`Gemini tidak memulangkan draf${reason?` (${reason})`:''}. Cuba jana semula.`,502);
-   }
-   let generated:any;
-   try{generated=JSON.parse(text);}catch{throw new AppError('Gemini memulangkan format JSON yang tidak dapat dibaca. Cuba jana semula.',502);}
 
-   const asText=(v:any)=>typeof v==='string'?v.trim():String(v??'').trim();
-   const topic=asText(brief.title)||'topik pembelajaran';
-   const ensureLong=(value:any,fallback:string,min=10)=>{
-    const t=asText(value);return t.length>=min?t:fallback;
+   const itemSchema={
+    type:'object',
+    additionalProperties:false,
+    properties:{
+     question:{type:'string',description:'Soalan sebenar dalam Bahasa Melayu, khusus kepada kandungan/topik. Jangan guna teks placeholder.'},
+     options:{type:'array',minItems:3,maxItems:3,items:{type:'string',description:'Pilihan jawapan sebenar dan bermakna, bukan Pilihan 1/Pilihan 2/Pilihan 3.'}},
+     answer:{type:'integer',minimum:0,maximum:2,description:'Indeks jawapan betul dalam options: 0, 1 atau 2.'},
+     feedback:{type:'string',description:'Maklum balas spesifik yang menerangkan mengapa jawapan itu betul.'}
+    },
+    required:['question','options','answer','feedback']
    };
-   const normalizeQuestion=(q:any,kind:'question'|'move',index:number)=>{
-    let question=asText(q?.question);
-    let options=Array.isArray(q?.options)?q.options.map((x:any)=>asText(x)).filter(Boolean).slice(0,3):[];
-    let answer=Number(q?.answer);
-    if(!Number.isInteger(answer)&&typeof q?.answer==='string'){
-     const idx=options.findIndex((x:string)=>x.toLowerCase()===q.answer.trim().toLowerCase());
-     answer=idx>=0?idx:0;
+   const stationSchema={
+    type:'object',
+    additionalProperties:false,
+    properties:{
+     note:{type:'string',description:'Nota ringkas guru/murid yang khusus kepada topik dan aktiviti, sekurang-kurangnya 1-3 ayat bermakna.'},
+     audio:{type:'string',description:'Cerita atau skrip audio lengkap dalam Bahasa Melayu Malaysia. Mesti mengandungi fakta/peristiwa yang cukup untuk menjawab ketiga-tiga soalan Stesen 1.'},
+     questions:{type:'array',minItems:3,maxItems:3,items:itemSchema,description:'Tepat 3 soalan kefahaman. Semua jawapan mesti boleh dikenal pasti daripada audio.'},
+     moves:{type:'array',minItems:3,maxItems:3,items:itemSchema,description:'Tepat 3 aktiviti pilihan untuk Stesen 2. Setiap soalan/pilihan mesti khusus kepada topik dan sesuai dijadikan objek/perkataan bergerak.'},
+     speaking:{type:'string',description:'Satu tugasan bertutur bercapah yang khusus kepada topik.'},
+     ideas:{type:'array',minItems:3,maxItems:3,items:{type:'string'},description:'Tepat 3 kad idea spesifik untuk membantu murid menjawab tugasan bertutur.'},
+     frame:{type:'string',description:'Satu ayat rangka yang boleh dilengkapkan murid untuk topik ini.'},
+     examples:{type:'string',description:'Sekurang-kurangnya 1-2 contoh jawapan bertutur yang spesifik kepada topik.'},
+     assessment:{type:'string',description:'Cadangan pentaksiran ringkas dan inklusif untuk guru.'}
+    },
+    required:['note','audio','questions','moves','speaking','ideas','frame','examples','assessment']
+   };
+
+   const difficultyGuide=level.toLowerCase().includes('tinggi')
+    ? 'Aras Tinggi: gunakan bahasa yang masih sesuai umur tetapi masukkan sebab-akibat, inferens mudah dan soalan yang meminta alasan. Audio sekitar 110-160 patah perkataan.'
+    : level.toLowerCase().includes('sederhana')
+    ? 'Aras Sederhana: gunakan ayat sederhana, maklumat tersurat serta sedikit inferens mudah. Audio sekitar 85-130 patah perkataan.'
+    : 'Aras Asas: gunakan ayat pendek, kosa kata mudah dan soalan fakta terus. Audio sekitar 60-100 patah perkataan.';
+
+   const system=`Anda ialah guru Bahasa Melayu sekolah rendah Malaysia yang membina aktiviti pembelajaran yang TERUS BOLEH DIGUNAKAN oleh murid Tahun ${year}.\n\nTUGAS UTAMA:\nJana kandungan sebenar untuk ketiga-tiga stesen berdasarkan TOPIK guru. Jangan sekadar mengisi template dan jangan guna teks generik.\n\n${difficultyGuide}\n\nSTESEN 1 — DENGAR DAN FAHAM\n1. note: nota ringkas yang benar-benar menerangkan fokus aktiviti/topik.\n2. audio: tulis CERITA / situasi / penerangan lengkap tentang topik. Audio mesti mempunyai nama/peristiwa/fakta/tindakan yang jelas supaya 3 soalan boleh dijawab daripada audio sahaja.\n3. questions: tepat 3 soalan kefahaman berdasarkan audio. Setiap soalan ada 3 pilihan jawapan sebenar. Distraktor mesti munasabah tetapi salah. Feedback mesti menyebut maklumat sebenar daripada audio.\n\nSTESEN 2 — DENGAR DAN GERAK\nJana tepat 3 item pilihan bergerak yang berkaitan terus dengan topik. Gunakan perkataan, objek, tindakan atau situasi sebenar. Jangan ulang soalan Stesen 1. Jangan gunakan 'Pilihan 1', 'Pilihan 2', 'Pilihan 3'.\n\nSTESEN 3 — BERTUTUR DAN JAWAB\nJana satu tugasan bertutur bercapah yang berkaitan topik, 3 kad idea spesifik, satu ayat rangka dan contoh jawapan sebenar.\n\nLARANGAN KERAS:\n- Jangan tulis 'Soalan kefahaman' sebagai isi soalan.\n- Jangan tulis 'Pilihan 1', 'Pilihan 2', 'Pilihan 3'.\n- Jangan beri audio generik seperti 'Hari ini kita belajar tentang ...' sahaja.\n- Jangan pulangkan medan title/year/difficulty kerana sistem mengekalkan maklumat guru.\n- Gunakan Bahasa Melayu Malaysia, bukan Bahasa Indonesia.\n- Pastikan kandungan tepat dengan tajuk/topik dan sesuai untuk Tahun ${year}.`;
+
+   const example=`CONTOH KUALITI YANG DIKEHENDAKI (JANGAN SALIN KANDUNGAN INI):\nJika topik ialah Keselamatan Jalan Raya, audio patut berbentuk cerita seperti murid melintas di lintasan belang, melihat lampu isyarat dan memegang tangan orang dewasa. Soalan patut bertanya perkara yang berlaku dalam cerita itu dengan tiga pilihan bermakna. Stesen 2 patut memilih tindakan selamat/tidak selamat. Stesen 3 patut meminta murid menerangkan cara melintas jalan dengan selamat.\n\nIni menunjukkan tahap SPESIFIK yang diperlukan, bukan kandungan yang perlu disalin.`;
+   const prompt=`${system}\n\n${example}\n\nMAKLUMAT GURU:\n${JSON.stringify(brief)}\n\nJana kandungan baharu sepenuhnya sekarang.`;
+
+   async function callGemini(extra=''){
+    let r:Response|undefined;
+    for(let attempt=0;attempt<2;attempt++){
+     r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,{
+      method:'POST',signal:AbortSignal.timeout(30000),
+      headers:{'Content-Type':'application/json','x-goog-api-key':env.GEMINI_API_KEY!},
+      body:JSON.stringify({
+       contents:[{role:'user',parts:[{text:`${prompt}${extra?`\n\n${extra}`:''}`}]}],
+       generationConfig:{responseMimeType:'application/json',responseSchema:stationSchema,temperature:0.65,maxOutputTokens:8192}
+      })
+     });
+     if(r.status<500||attempt===1)break;
+     await new Promise(resolve=>setTimeout(resolve,900));
     }
-    const questionFallbacks=[
-     `Apakah topik utama yang dipelajari dalam aktiviti ini?`,
-     `Pilih pernyataan yang paling berkaitan dengan topik ${topic}.`,
-     `Apakah tindakan atau idea yang sesuai dengan topik ${topic}?`
-    ];
-    const moveFallbacks=[
-     `Pilih perkataan atau idea yang paling berkaitan dengan ${topic}.`,
-     `Pilih jawapan yang sesuai untuk aktiviti ${topic}.`,
-     `Pilih pilihan yang menunjukkan kefahaman tentang ${topic}.`
-    ];
-    if(question.length<3)question=(kind==='move'?moveFallbacks:questionFallbacks)[index%3];
-    const defaults=[topic,'Pilihan yang tidak berkaitan','Pilihan lain'];
-    while(options.length<3)options.push(defaults[options.length]||`Pilihan ${options.length+1}`);
-    options=options.slice(0,3);
-    if(!Number.isInteger(answer)||answer<0||answer>2)answer=0;
-    let feedback=asText(q?.feedback);
-    if(!feedback)feedback=answer===0?`Bagus! Jawapan ini berkaitan dengan ${topic}.`:`Semak semula pilihan yang paling berkaitan dengan ${topic}.`;
-    return {question,options,answer,feedback};
-   };
-   const ensureThree=(arr:any,kind:'question'|'move')=>{
-    const src=Array.isArray(arr)?arr:[];const out=[] as any[];
-    for(let i=0;i<3;i++)out.push(normalizeQuestion(src[i]||{},kind,i));
-    return out;
-   };
-   const buildActivity=(g:any)=>{
-    const noteFallback=`Aktiviti ini membantu murid memahami topik ${topic} melalui aktiviti mendengar, memilih jawapan dan bertutur secara mudah.`;
-    const audioFallback=`Dengar dengan teliti. Hari ini kita belajar tentang ${topic}. Murid akan mengenal maklumat penting, memilih jawapan yang sesuai dan berkongsi idea tentang ${topic}.`;
-    const ideaSource=Array.isArray(g?.ideas)?g.ideas.map((x:any)=>asText(x)).filter(Boolean):[];
-    const ideaDefaults=[`Saya tahu sesuatu tentang ${topic}.`,`Saya boleh beri contoh berkaitan ${topic}.`,`Saya boleh terangkan idea saya tentang ${topic}.`];
-    while(ideaSource.length<3)ideaSource.push(ideaDefaults[ideaSource.length]);
-    return {
-     title:brief.title,
-     year:brief.year,
-     skill:brief.skill,
-     difficulty:brief.difficulty,
-     sk:brief.sk,
-     sp:brief.sp,
-     objectives:brief.objectives,
-     note:ensureLong(g?.note,noteFallback),
-     audio:ensureLong(g?.audio,audioFallback),
-     questions:ensureThree(g?.questions,'question'),
-     moves:ensureThree(g?.moves,'move'),
-     speaking:ensureLong(g?.speaking,`Ceritakan satu idea atau pengalaman kamu yang berkaitan dengan ${topic}.`,5),
-     ideas:ideaSource.slice(0,3),
-     frame:asText(g?.frame)||'Pada pendapat saya, … kerana …',
-     examples:asText(g?.examples)||`Contoh: Saya boleh menerangkan satu perkara yang saya tahu tentang ${topic}.`,
-     supports:brief.supports,
-     emk:brief.emk,
-     assessment:asText(g?.assessment)||'Semak kefahaman, ketepatan jawapan dan kerelevanan idea murid. Terima jawapan munasabah dan berikan peluang mencuba semula.'
-    };
+    if(!r?.ok){
+     const status=r?.status||502;let detail='';
+     try{const err:any=await r?.json();detail=String(err?.error?.message||err?.error?.status||'').slice(0,220);}catch{}
+     if(status===401||status===403)throw new AppError('Gemini menolak API key. Semak GEMINI_API_KEY dalam Cloudflare.',502);
+     if(status===404)throw new AppError('Model Gemini tidak ditemui. Semak GEMINI_MODEL dalam Cloudflare.',502);
+     if(status===429)throw new AppError('Had atau kuota Gemini dicapai. Tunggu sebentar dan cuba lagi.',502);
+     throw new AppError(`Gemini gagal menjana aktiviti (${status})${detail?`: ${detail}`:''}.`,502);
+    }
+    const data:any=await r.json();
+    const txt=(data?.candidates?.[0]?.content?.parts||[]).map((p:any)=>p?.text||'').join('').trim();
+    if(!txt)throw new AppError('Gemini tidak memulangkan kandungan. Cuba jana semula.',502);
+    try{return JSON.parse(txt);}catch{throw new AppError('Gemini memulangkan JSON yang tidak dapat dibaca. Cuba jana semula.',502);}
+   }
+
+   const clean=(v:any)=>typeof v==='string'?v.trim():'';
+   const normalizeItem=(q:any)=>({
+    question:clean(q?.question),
+    options:Array.isArray(q?.options)?q.options.map((x:any)=>clean(x)).slice(0,3):[],
+    answer:Number.isInteger(Number(q?.answer))?Number(q.answer):0,
+    feedback:clean(q?.feedback)
+   });
+   const buildActivity=(g:any)=>({
+    title:brief.title,year:brief.year,skill:brief.skill,difficulty:brief.difficulty,sk:brief.sk,sp:brief.sp,objectives:brief.objectives,
+    note:clean(g?.note),audio:clean(g?.audio),
+    questions:Array.isArray(g?.questions)?g.questions.slice(0,3).map(normalizeItem):[],
+    moves:Array.isArray(g?.moves)?g.moves.slice(0,3).map(normalizeItem):[],
+    speaking:clean(g?.speaking),ideas:Array.isArray(g?.ideas)?g.ideas.map((x:any)=>clean(x)).filter(Boolean).slice(0,3):[],
+    frame:clean(g?.frame),examples:clean(g?.examples),supports:brief.supports,emk:brief.emk,assessment:clean(g?.assessment)
+   });
+   const badPlaceholder=(t:string)=>/^(soalan kefahaman|pilihan\s*[123]|maklum balas apabila betul|jawapan betul)$/i.test(t.trim());
+   const qualityProblems=(d:any)=>{
+    const issues:string[]=[];
+    const words=String(d.audio||'').trim().split(/\s+/).filter(Boolean).length;
+    const minWords=level.toLowerCase().includes('tinggi')?80:level.toLowerCase().includes('sederhana')?60:45;
+    if(words<minWords)issues.push(`audio terlalu pendek (${words} patah perkataan)`);
+    if(String(d.note||'').length<25)issues.push('nota terlalu ringkas');
+    if(!Array.isArray(d.questions)||d.questions.length!==3)issues.push('Stesen 1 tidak mempunyai tepat 3 soalan');
+    if(!Array.isArray(d.moves)||d.moves.length!==3)issues.push('Stesen 2 tidak mempunyai tepat 3 item');
+    for(const [label,arr] of [['Stesen 1',d.questions],['Stesen 2',d.moves]] as any){
+     for(let i=0;i<(arr||[]).length;i++){
+      const q=arr[i];if(!q?.question||q.question.length<8||badPlaceholder(q.question))issues.push(`${label} item ${i+1} soalan tidak spesifik`);
+      if(!Array.isArray(q?.options)||q.options.length!==3||q.options.some((x:string)=>!x||badPlaceholder(x)))issues.push(`${label} item ${i+1} pilihan tidak lengkap/spesifik`);
+      if(new Set((q?.options||[]).map((x:string)=>x.toLowerCase())).size!==3)issues.push(`${label} item ${i+1} mempunyai pilihan berulang`);
+      if(!Number.isInteger(q?.answer)||q.answer<0||q.answer>2)issues.push(`${label} item ${i+1} jawapan tidak sah`);
+      if(!q?.feedback||q.feedback.length<8)issues.push(`${label} item ${i+1} maklum balas terlalu ringkas`);
+     }
+    }
+    if(!d.speaking||d.speaking.length<10)issues.push('tugasan bertutur terlalu ringkas');
+    if(!Array.isArray(d.ideas)||d.ideas.length!==3)issues.push('kad idea tidak tepat 3');
+    if(!d.frame||d.frame.length<5)issues.push('ayat rangka kosong');
+    if(!d.examples||d.examples.length<15)issues.push('contoh jawapan terlalu ringkas');
+    return issues;
    };
 
+   let generated=await callGemini();
    let draft=buildActivity(generated);
+   let problems=qualityProblems(draft);
    let checked=activitySchema.safeParse(draft);
-   if(!checked.success){
-    console.warn('Gemini draft needs repair',checked.error.issues.map((x:any)=>`${x.path.join('.')}: ${x.message}`).join(' | '));
-    const repairPrompt=`Betulkan JSON berikut supaya mematuhi format aktiviti. Jangan ubah topik. Pulangkan JSON kandungan stesen sahaja dengan keys: note, audio, questions, moves, speaking, ideas, frame, examples, assessment. questions dan moves mesti tepat 3 item; setiap item mesti ada question, options tepat 3 string, answer nombor 0/1/2, feedback. ideas mesti tepat 3 string. Pastikan semua teks tidak kosong.\n\nRalat format: ${checked.error.issues.map((x:any)=>`${x.path.join('.')}: ${x.message}`).join('; ')}\n\nJSON asal:\n${JSON.stringify(generated)}`;
-    const rr=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,{
-     method:'POST',signal:AbortSignal.timeout(30000),headers:{'Content-Type':'application/json','x-goog-api-key':env.GEMINI_API_KEY},
-     body:JSON.stringify({contents:[{role:'user',parts:[{text:repairPrompt}]}],generationConfig:{responseMimeType:'application/json',temperature:0.2,maxOutputTokens:8192}})
-    });
-    if(rr.ok){
-     const rd:any=await rr.json();
-     const rt=(rd?.candidates?.[0]?.content?.parts||[]).map((p:any)=>p?.text||'').join('').trim();
-     try{generated=JSON.parse(rt);draft=buildActivity(generated);checked=activitySchema.safeParse(draft);}catch{}
-    }
+   if(problems.length||!checked.success){
+    const why=[...problems,...(!checked.success?checked.error.issues.map((x:any)=>`${x.path.join('.')}: ${x.message}`):[])].slice(0,12).join('; ');
+    generated=await callGemini(`JANA SEMULA DARI KOSONG. Output sebelumnya tidak cukup berkualiti. Masalah: ${why}. Jangan baiki dengan placeholder. Tulis cerita/audio sebenar dan semua soalan/pilihan sebenar berdasarkan topik ${topic}.`);
+    draft=buildActivity(generated);problems=qualityProblems(draft);checked=activitySchema.safeParse(draft);
    }
-   if(!checked.success){
-    // Repair terakhir dibuat secara deterministic supaya output AI yang tidak lengkap
-    // tetap menjadi struktur aktiviti yang sah tanpa meminta guru jana berulang kali.
-    draft=buildActivity(generated);checked=activitySchema.safeParse(draft);
-   }
-   if(!checked.success){
-    const detail=checked.error.issues.slice(0,6).map((x:any)=>`${x.path.join('.')}: ${x.message}`).join('; ');
-    console.error('Gemini activity validation failed after deterministic repair',detail);
-    throw new AppError(`Draf Gemini tidak dapat dibaiki (${detail}). Cuba jana semula.`,502);
+   if(problems.length||!checked.success){
+    const detail=[...problems,...(!checked.success?checked.error.issues.map((x:any)=>`${x.path.join('.')}: ${x.message}`):[])].slice(0,8).join('; ');
+    throw new AppError(`Gemini belum menghasilkan aktiviti yang cukup spesifik (${detail}). Tekan Jana Aktiviti sekali lagi.`,502);
    }
    return json({activity:checked.data});
   }
