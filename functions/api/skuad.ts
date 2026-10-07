@@ -174,7 +174,7 @@ async function handler(req:Request,env:Env):Promise<Response>{
     emk:input.emk,
     supports:input.supports
    };
-   const system='Anda pembina draf aktiviti Bahasa Melayu inklusif sekolah rendah Malaysia. Hasilkan SATU aktiviti BAHARU sepenuhnya berdasarkan maklumat guru. Jangan salin, ulang atau mengekalkan kandungan contoh/default yang pernah ada dalam sistem. Tajuk/topik, tahun dan tahap kesukaran ialah arahan utama dan semua kandungan Stesen 1, 2 dan 3 mesti berkait jelas dengan tajuk tersebut serta sesuai dengan umur dan aras murid. Pulangkan JSON sahaja dengan keys: title, year, skill, difficulty, sk, sp, objectives, note, audio, questions, moves, speaking, ideas, frame, examples, supports, emk, assessment. Kekalkan title, year dan difficulty tepat seperti yang diberi guru. Jika SK, SP, objectives atau emk diberi, selaraskan dan perkemaskan mengikut topik; jika terlalu umum, hasilkan cadangan yang lebih sesuai. Stesen 1: cipta note dan audio baharu, kemudian tepat 3 questions yang hanya boleh dijawab berdasarkan audio. Stesen 2: cipta tepat 3 moves yang berkait dengan topik, sesuai untuk perkataan bergerak dan aktiviti pilihan. Stesen 3: cipta satu soalan bertutur bercapah, 3 kad idea, ayat rangka, contoh jawapan dan cadangan pentaksiran. Setiap item questions dan moves mesti ada question, options tepat 3 string, answer indeks 0 hingga 2, dan feedback ringkas. Gunakan Bahasa Melayu Malaysia yang mudah, natural dan sesuai tahap murid. Kesukaran Asas = ayat dan konsep sangat mudah; Sederhana = memerlukan sedikit inferens; Tinggi = memerlukan alasan atau pemikiran lebih mendalam tetapi masih sesuai umur. Jangan nilai loghat, kelajuan atau kelantangan murid. Kandungan ialah draf dan mesti disemak guru sebelum diluluskan.';
+   const system='Anda pembina draf aktiviti Bahasa Melayu inklusif sekolah rendah Malaysia. Jana KANDUNGAN STESEN SAHAJA berdasarkan maklumat guru. Jangan pulangkan title, year, skill, difficulty, sk, sp, objectives, supports atau emk kerana sistem akan mengekalkan medan guru secara automatik. Pulangkan JSON sahaja dengan keys tepat ini: note, audio, questions, moves, speaking, ideas, frame, examples, assessment. Stesen 1: note dan audio baharu yang jelas berkait dengan topik, kemudian tepat 3 questions yang hanya boleh dijawab berdasarkan audio. Stesen 2: tepat 3 moves yang berkait dengan topik dan sesuai untuk aktiviti pilihan perkataan bergerak. Stesen 3: satu soalan bertutur bercapah, tepat 3 kad idea, satu ayat rangka, contoh jawapan dan cadangan pentaksiran. Setiap item dalam questions dan moves WAJIB berbentuk {question:string, options:[string,string,string], answer:0|1|2, feedback:string}. options mesti TEPAT 3 pilihan dan answer mesti nombor indeks 0, 1 atau 2. Gunakan Bahasa Melayu Malaysia yang mudah dan natural. Kesukaran Asas = ayat dan konsep sangat mudah; Sederhana = sedikit inferens; Tinggi = perlu alasan/pemikiran lebih mendalam tetapi masih sesuai umur. Jangan nilai loghat, kelajuan atau kelantangan murid. Kandungan ialah draf dan mesti disemak guru.';
    const model=env.GEMINI_MODEL||'gemini-2.5-flash-lite';
    const prompt=`${system}\n\nMAKLUMAT AKTIVITI DARIPADA GURU (ini sahaja sumber kandungan):\n${JSON.stringify(brief)}`;
    let r:Response|undefined;
@@ -208,8 +208,60 @@ async function handler(req:Request,env:Env):Promise<Response>{
     throw new AppError(`Gemini tidak memulangkan draf${reason?` (${reason})`:''}. Cuba jana semula.`,502);
    }
    let generated:any;
-   try{generated=JSON.parse(text);}catch{throw new AppError('Gemini memulangkan format yang tidak dapat dibaca. Cuba jana semula.',502);}
-   try{return json({activity:activitySchema.parse(generated)});}catch(e:any){console.error('Gemini activity validation failed',e?.message||e);throw new AppError('Draf Gemini tidak lengkap atau format aktiviti tidak tepat. Cuba jana semula.',502);}
+   try{generated=JSON.parse(text);}catch{throw new AppError('Gemini memulangkan format JSON yang tidak dapat dibaca. Cuba jana semula.',502);}
+
+   const asText=(v:any)=>typeof v==='string'?v.trim():String(v??'').trim();
+   const normalizeQuestion=(q:any)=>{
+    const options=Array.isArray(q?.options)?q.options.map((x:any)=>asText(x)).filter(Boolean).slice(0,3):[];
+    let answer=Number(q?.answer);
+    if(!Number.isInteger(answer)&&typeof q?.answer==='string'){
+     const idx=options.findIndex((x:string)=>x.toLowerCase()===q.answer.trim().toLowerCase());
+     answer=idx>=0?idx:0;
+    }
+    return {question:asText(q?.question),options,answer,feedback:asText(q?.feedback)};
+   };
+   const buildActivity=(g:any)=>({
+    title:brief.title,
+    year:brief.year,
+    skill:brief.skill,
+    difficulty:brief.difficulty,
+    sk:brief.sk,
+    sp:brief.sp,
+    objectives:brief.objectives,
+    note:asText(g?.note),
+    audio:asText(g?.audio),
+    questions:Array.isArray(g?.questions)?g.questions.slice(0,3).map(normalizeQuestion):[],
+    moves:Array.isArray(g?.moves)?g.moves.slice(0,3).map(normalizeQuestion):[],
+    speaking:asText(g?.speaking),
+    ideas:Array.isArray(g?.ideas)?g.ideas.map((x:any)=>asText(x)).filter(Boolean).slice(0,3):[],
+    frame:asText(g?.frame),
+    examples:asText(g?.examples),
+    supports:brief.supports,
+    emk:brief.emk,
+    assessment:asText(g?.assessment)
+   });
+
+   let draft=buildActivity(generated);
+   let checked=activitySchema.safeParse(draft);
+   if(!checked.success){
+    console.warn('Gemini draft needs repair',checked.error.issues.map((x:any)=>`${x.path.join('.')}: ${x.message}`).join(' | '));
+    const repairPrompt=`Betulkan JSON berikut supaya mematuhi format aktiviti. Jangan ubah topik. Pulangkan JSON kandungan stesen sahaja dengan keys: note, audio, questions, moves, speaking, ideas, frame, examples, assessment. questions dan moves mesti tepat 3 item; setiap item mesti ada question, options tepat 3 string, answer nombor 0/1/2, feedback. ideas mesti tepat 3 string. Pastikan semua teks tidak kosong.\n\nRalat format: ${checked.error.issues.map((x:any)=>`${x.path.join('.')}: ${x.message}`).join('; ')}\n\nJSON asal:\n${JSON.stringify(generated)}`;
+    const rr=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,{
+     method:'POST',signal:AbortSignal.timeout(30000),headers:{'Content-Type':'application/json','x-goog-api-key':env.GEMINI_API_KEY},
+     body:JSON.stringify({contents:[{role:'user',parts:[{text:repairPrompt}]}],generationConfig:{responseMimeType:'application/json',temperature:0.2,maxOutputTokens:8192}})
+    });
+    if(rr.ok){
+     const rd:any=await rr.json();
+     const rt=(rd?.candidates?.[0]?.content?.parts||[]).map((p:any)=>p?.text||'').join('').trim();
+     try{generated=JSON.parse(rt);draft=buildActivity(generated);checked=activitySchema.safeParse(draft);}catch{}
+    }
+   }
+   if(!checked.success){
+    const detail=checked.error.issues.slice(0,4).map((x:any)=>`${x.path.join('.')}: ${x.message}`).join('; ');
+    console.error('Gemini activity validation failed',detail);
+    throw new AppError(`Draf Gemini masih tidak lengkap (${detail}). Cuba jana semula.`,502);
+   }
+   return json({activity:checked.data});
   }
   throw new AppError('Tindakan tidak sah.');
  }catch(e:any){
