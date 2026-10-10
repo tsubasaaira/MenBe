@@ -3,7 +3,7 @@ import {studentActivity,checkAnswer,isTeacher} from '../../lib/server-rules';
 
 class AppError extends Error {constructor(message:string,public status=400){super(message);}}
 const json=(body:unknown,status=200)=>Response.json(body,{status,headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
-type Env={FIREBASE_SERVICE_ACCOUNT_JSON?:string;GEMINI_API_KEY?:string;GEMINI_MODEL?:string};
+type Env={FIREBASE_SERVICE_ACCOUNT_JSON?:string;GEMINI_API_KEY?:string;GEMINI_MODEL?:string;GEMINI_TTS_MODEL?:string};
 type ServiceAccount={project_id:string;client_email:string;private_key:string;token_uri?:string};
 type AuthUser={uid:string;sub:string;email?:string;name?:string;email_verified?:boolean;firebase:{sign_in_provider?:string;[key:string]:unknown};aud:string;iss:string;exp:number;iat:number;auth_time?:number;[key:string]:unknown};
 type FsDoc={id:string;[key:string]:any};
@@ -141,6 +141,40 @@ async function handler(req:Request,env:Env):Promise<Response>{
    if(!prev)await fsUpdate(env,'sessions',code,{count:(Number(s.count)||0)+1});
    return json({pupil:{id:pid,nickname,avatar:b.avatar},session:{id:code,title:s.title,status:s.status,sequential:s.sequential},activity:studentActivity(s.activity)});
   }
+  if(b.op==='tts'){
+   if(!env.GEMINI_API_KEY)throw new AppError('TTS AI Bahasa Melayu belum disambungkan. Tambah GEMINI_API_KEY dalam Cloudflare.',503);
+   const text=str(b.text,3000);
+   const model=env.GEMINI_TTS_MODEL||'gemini-3.8-flash-lite-tts';
+   let r:Response|undefined;
+   for(let attempt=0;attempt<2;attempt++){
+    r=await fetch('https://generativelanguage.googleapis.com/v1beta/interactions',{
+     method:'POST',signal:AbortSignal.timeout(45000),
+     headers:{'Content-Type':'application/json','x-goog-api-key':env.GEMINI_API_KEY},
+     body:JSON.stringify({
+      model,
+      input:[{type:'user_input',content:[{type:'text',text,annotations:[{type:'speech_metadata',style:'clear, warm teacher voice, moderate pace'}]}]}],
+      response_format:{type:'audio',mime_type:'audio/wav',sample_rate:24000},
+      generation_config:{speech_config:[{voice:'Kore'}]}
+     })
+    });
+    if(r.status<500||attempt===1)break;
+    await new Promise(resolve=>setTimeout(resolve,800));
+   }
+   if(!r?.ok){
+    const status=r?.status||502;let detail='';
+    try{const err:any=await r?.json();detail=String(err?.error?.message||err?.error?.status||'').slice(0,220);}catch{}
+    if(status===401||status===403)throw new AppError('Gemini TTS menolak API key. Semak GEMINI_API_KEY dalam Cloudflare.',502);
+    if(status===404)throw new AppError(`Model Gemini TTS tidak ditemui (${model}).`,502);
+    if(status===429)throw new AppError('Kuota TTS Gemini sedang penuh. Cuba lagi sebentar.',429);
+    throw new AppError(`Gemini TTS gagal (${status})${detail?`: ${detail}`:''}.`,502);
+   }
+   const data:any=await r.json();
+   let audio:any=null;
+   for(const step of data?.steps||[])for(const part of step?.content||[])if(part?.type==='audio'&&part?.data)audio=part;
+   if(!audio?.data)throw new AppError('Gemini TTS tidak memulangkan audio. Cuba sekali lagi.',502);
+   const mime=String(audio.mime_type||audio.mimeType||'audio/wav');
+   return json({audio:`data:${mime};base64,${audio.data}`,model,language:'ms'});
+  }
   if(b.op==='answer'){
    const {p,s}=await participation(env,user.uid);const station=Number(b.station),qi=Number(b.question);const answer=str(b.answer,3000);const mode=['teks','suara','kad idea','gerakan','pilihan'].includes(b.mode)?b.mode:'teks';let evaluated;try{evaluated=checkAnswer(s.activity,station,qi,answer);}catch(e){throw new AppError((e as Error).message);}
    const current=await fsGet(env,'sessions',s.id);if(!current||current.status!=='Aktif')throw new AppError('Sesi telah tamat. Jawapan ini belum disimpan. Hubungi cikgu.');
@@ -251,7 +285,7 @@ async function handler(req:Request,env:Env):Promise<Response>{
    });
    const buildActivity=(g:any)=>({
     title:brief.title,year:brief.year,skill:brief.skill,difficulty:brief.difficulty,sk:brief.sk,sp:brief.sp,objectives:brief.objectives,
-    note:clean(g?.note),audio:clean(g?.audio),
+    note:clean(g?.note),audio:clean(g?.audio),audioMode:input.audioMode||'tts',audioRecording:input.audioRecording||'',audioRecordingName:input.audioRecordingName||'',
     questions:Array.isArray(g?.questions)?g.questions.slice(0,3).map(normalizeItem):[],
     moves:Array.isArray(g?.moves)?g.moves.slice(0,3).map(normalizeItem):[],
     speaking:clean(g?.speaking),ideas:Array.isArray(g?.ideas)?g.ideas.map((x:any)=>clean(x)).filter(Boolean).slice(0,3):[],
